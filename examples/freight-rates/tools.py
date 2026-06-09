@@ -1,13 +1,11 @@
-"""Freight rate tools: Excel negotiated-rate reader, FreightPulse API, GoComet API."""
+"""Freight rate tools: FreightPulse API, GoComet API."""
 
 from __future__ import annotations
 
 import os
-from functools import lru_cache
 from typing import Optional
 
 import httpx
-import openpyxl
 from langchain_core.tools import tool
 
 # ── Port name → UNLOCODE lookup ───────────────────────────────────────────────
@@ -56,67 +54,6 @@ def _to_unlocode(port_name: str) -> str:
         if k in key:
             return v
     return key.upper().replace(" ", "")
-
-
-def _excel_path() -> str:
-    return os.environ.get(
-        "FREIGHT_EXCEL_PATH",
-        r"C:\Users\reca\Downloads\Freight Summary - Submission to Exp & Imp (2).xlsx",
-    )
-
-
-# ── Excel data loader ─────────────────────────────────────────────────────────
-
-@lru_cache(maxsize=1)
-def _load_records(path: str) -> list[dict]:
-    """Parse the FCL V-V CIF worksheet into structured carrier-route dicts."""
-    wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
-    ws = wb["FCL V-V CIF"]
-    rows = list(ws.iter_rows(values_only=True))
-
-    def _rate(v):
-        return float(v) if isinstance(v, (int, float)) else None
-
-    def _str(v):
-        if v is None:
-            return None
-        s = str(v).replace("\n", " ").strip()
-        return None if s in ("", "-", "None") else s
-
-    records = []
-    for row in rows[3:]:  # rows 0-2 are header rows
-        pol = _str(row[7])
-        pod = _str(row[8])
-        if not pol or not pod:
-            continue
-        records.append({
-            "pol": pol,
-            "pod": pod,
-            "carrier": _str(row[9]),
-            "final_nominated": _str(row[10]),
-            "rate_20ft_current": _rate(row[11]),
-            "rate_40ft_current": _rate(row[12]),
-            "rate_20ft_new": _rate(row[13]),
-            "rate_40ft_new": _rate(row[14]),
-            "freight_condition": _str(row[15]),
-            "transit_days": _rate(row[16]),
-            "frequency_weekly": _str(row[17]),
-            "transshipment_port": _str(row[18]),
-            "service_provider": _str(row[19]),
-            "cy_closed_day": _str(row[20]),
-            "etd_day": _str(row[21]),
-            "dem_origin": _rate(row[24]),
-            "det_origin": _rate(row[25]),
-            "dem_det_combined_origin": _rate(row[26]),
-            "dem_pod": _rate(row[27]),
-            "det_pod": _rate(row[28]),
-            "dem_det_combined_pod": _rate(row[29]),
-            "remarks": _str(row[30]),
-            "ttap_comment": _str(row[31]),
-            "importer_comment": _str(row[32]),
-            "exporter_comment": _str(row[33]),
-        })
-    return records
 
 
 # ── FreightPulse helpers ──────────────────────────────────────────────────────
@@ -174,84 +111,6 @@ async def _gc_get(endpoint: str, params: dict | None = None) -> dict | str:
 # ═════════════════════════════════════════════════════════════════════════════
 # TOOLS
 # ═════════════════════════════════════════════════════════════════════════════
-
-
-@tool
-def list_routes() -> str:
-    """List all unique trade lanes (origin → destination) in the negotiated freight rate Excel."""
-    records = _load_records(_excel_path())
-    routes: dict[tuple, list[str]] = {}
-    for r in records:
-        key = (r["pol"], r["pod"])
-        routes.setdefault(key, [])
-        if r["carrier"]:
-            routes[key].append(r["carrier"])
-
-    lines = ["Negotiated Trade Lanes (FCL V-V CIF)\n" + "─" * 55]
-    for (pol, pod), carriers in sorted(routes.items()):
-        unique = sorted(set(carriers))
-        lines.append(f"  {pol}  →  {pod}  ({len(unique)} carrier(s))")
-    return "\n".join(lines)
-
-
-@tool
-def query_negotiated_rates(
-    origin: str,
-    destination: str,
-    carrier: Optional[str] = None,
-) -> str:
-    """Query negotiated FCL all-in freight rates from the internal Excel rate sheet.
-
-    Args:
-        origin: Port of Loading — partial name OK (e.g. 'Dalian', 'Shanghai', 'Laemchabang')
-        destination: Port of Discharge — partial name OK (e.g. 'Bangkok', 'Jakarta', 'Klang')
-        carrier: Optional carrier name filter (partial match)
-    """
-    records = _load_records(_excel_path())
-    ol, dl = origin.lower(), destination.lower()
-
-    matches = [
-        r for r in records
-        if ol in r["pol"].lower() and dl in r["pod"].lower()
-        and (carrier is None or carrier.lower() in (r["carrier"] or "").lower())
-    ]
-
-    if not matches:
-        return f"No negotiated rates found for {origin} → {destination}."
-
-    lines = [f"Negotiated Rates — {origin} → {destination}", "─" * 60]
-    for r in matches:
-        tag = "  ✓ NOMINATED" if r["final_nominated"] else ""
-        lines.append(f"\n  Carrier: {r['carrier'] or 'N/A'}{tag}")
-
-        cur20, cur40 = r["rate_20ft_current"], r["rate_40ft_current"]
-        new20, new40 = r["rate_20ft_new"], r["rate_40ft_new"]
-        if cur20 or cur40:
-            lines.append(f"    Current — 20ft: ${cur20 or 'N/A'}  |  40ft: ${cur40 or 'N/A'}")
-        if new20 or new40:
-            lines.append(f"    New     — 20ft: ${new20 or 'N/A'}  |  40ft: ${new40 or 'N/A'}")
-
-        td = int(r["transit_days"]) if r["transit_days"] else "?"
-        via = f"via {r['transshipment_port']}" if r["transshipment_port"] else "direct"
-        lines.append(f"    Transit: {td} days ({via}) | Freq: {r['frequency_weekly'] or '?'}x/week")
-
-        if r["freight_condition"]:
-            lines.append(f"    Condition: {r['freight_condition']}")
-
-        ft_parts = []
-        if r["dem_pod"]:
-            ft_parts.append(f"DEM {int(r['dem_pod'])}d")
-        if r["det_pod"]:
-            ft_parts.append(f"DET {int(r['det_pod'])}d")
-        if r["dem_det_combined_pod"]:
-            ft_parts.append(f"DEM+DET {int(r['dem_det_combined_pod'])}d")
-        if ft_parts:
-            lines.append(f"    Free time POD: {' | '.join(ft_parts)}")
-
-        if r["remarks"]:
-            lines.append(f"    Remarks: {r['remarks'][:150]}")
-
-    return "\n".join(lines)
 
 
 @tool
@@ -343,88 +202,6 @@ async def get_supply_chain_disruptions() -> str:
         if updated:
             line += f" (updated: {updated})"
         lines.append(line)
-    return "\n".join(lines)
-
-
-@tool
-async def compare_rates(origin: str, destination: str) -> str:
-    """Compare internal negotiated rates (Excel) against live FreightPulse market rates for a trade lane.
-
-    Args:
-        origin: Port of Loading name (e.g. 'Dalian', 'Shanghai', 'Laemchabang')
-        destination: Port of Discharge name (e.g. 'Bangkok', 'Laemchabang', 'Jakarta')
-    """
-    records = _load_records(_excel_path())
-    ol, dl = origin.lower(), destination.lower()
-    matches = [
-        r for r in records
-        if ol in r["pol"].lower() and dl in r["pod"].lower()
-    ]
-
-    # Pull live market data
-    origin_code = _to_unlocode(origin)
-    dest_code = _to_unlocode(destination)
-    market_data = await _fp_get("freight-rates", {"mode": "ocean", "origin": origin_code, "destination": dest_code})
-    ocean = (market_data.get("ocean", []) if isinstance(market_data, dict) else [])
-    market_40ft = float(ocean[0]["rate_40ft"]) if ocean and ocean[0].get("rate_40ft") else None
-    market_trend = ocean[0].get("trend") if ocean else None
-
-    lines = [
-        f"Rate Comparison — {origin} → {destination}",
-        "═" * 60,
-    ]
-
-    if market_40ft:
-        lines.append(f"\n  FreightPulse Market (40ft): ${market_40ft:,.0f}  |  Trend: {market_trend or 'N/A'}")
-    elif isinstance(market_data, str):
-        lines.append(f"\n  FreightPulse: {market_data}")
-
-    if matches:
-        lines.append("\n  Negotiated Rates:")
-        for r in matches:
-            rate40 = r["rate_40ft_new"] or r["rate_40ft_current"]
-            rate20 = r["rate_20ft_new"] or r["rate_20ft_current"]
-            nominated = " ✓" if r["final_nominated"] else ""
-            savings = ""
-            if rate40 and market_40ft:
-                diff = market_40ft - rate40
-                pct = (diff / market_40ft) * 100
-                savings = f"  ({'SAVING' if diff > 0 else 'ABOVE MARKET'} {abs(pct):.1f}%)"
-            td = int(r["transit_days"]) if r["transit_days"] else "?"
-            via = f"via {r['transshipment_port']}" if r["transshipment_port"] else "direct"
-            lines.append(
-                f"    • {r['carrier'] or 'N/A'}{nominated}: "
-                f"20ft ${rate20 or 'N/A'} | 40ft ${rate40 or 'N/A'}{savings} | "
-                f"{td}d {via}"
-            )
-    else:
-        lines.append(f"\n  No negotiated rates found for {origin} → {destination} in Excel.")
-
-    return "\n".join(lines)
-
-
-@tool
-def get_nominated_carriers() -> str:
-    """List all routes with a Final Nominated Carrier from the Excel rate sheet."""
-    records = _load_records(_excel_path())
-    nominated = [r for r in records if r["final_nominated"]]
-    if not nominated:
-        return "No nominated carriers found in the rate sheet."
-
-    lines = ["Final Nominated Carriers — All Lanes", "─" * 55]
-    seen = set()
-    for r in nominated:
-        key = (r["pol"], r["pod"], r["final_nominated"])
-        if key in seen:
-            continue
-        seen.add(key)
-        rate = r["rate_40ft_new"] or r["rate_40ft_current"]
-        td = int(r["transit_days"]) if r["transit_days"] else "?"
-        lines.append(
-            f"  • {r['pol']} → {r['pod']}: {r['final_nominated']}"
-            + (f"  |  40ft ${rate}" if rate else "")
-            + f"  |  {td}d"
-        )
     return "\n".join(lines)
 
 

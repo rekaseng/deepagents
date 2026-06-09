@@ -1,7 +1,7 @@
 [project]
 name = "freight-rates-agent"
 version = "0.1.0"
-description = "Supply chain visibility agent combining negotiated rates (Excel) with FreightPulse and GoComet market intelligence"
+description = "Supply chain visibility agent combining FreightPulse and GoComet market intelligence"
 requires-python = ">=3.11"
 dependencies = [
     "deepagents>=0.2.6",
@@ -10,7 +10,6 @@ dependencies = [
     "langgraph-checkpoint>=2.0.0",
     "python-dotenv>=1.2.2",
     "httpx>=0.28.0",
-    "openpyxl>=3.1.0",
     "rich>=13.0.0",
 ]
 
