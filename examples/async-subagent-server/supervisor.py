@@ -26,7 +26,7 @@ import uuid
 from pathlib import Path
 
 from dotenv import load_dotenv
-from langchain_anthropic import ChatAnthropic
+from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage
 from langgraph.checkpoint.memory import MemorySaver
 
@@ -37,7 +37,7 @@ load_dotenv(Path(__file__).parent / ".env")
 
 import os  # noqa: E402
 
-RESEARCHER_URL = os.environ.get("RESEARCHER_URL", "http://localhost:2024")
+RESEARCHER_URL = os.environ.get("RESEARCHER_URL") or "http://localhost:2024"
 
 # ── Agent setup ───────────────────────────────────────────────────────────────
 
@@ -58,7 +58,11 @@ checkpointer = MemorySaver()
 thread_id = str(uuid.uuid4())
 
 supervisor = create_deep_agent(
-    model=ChatAnthropic(model="claude-sonnet-4-5"),
+    model=ChatOpenAI(
+        model="deepseek-chat",
+        openai_api_base="https://api.deepseek.com",
+        openai_api_key=os.environ.get("DEEPSEEK_API_KEY", ""),
+    ),
     checkpointer=checkpointer,
     system_prompt=(
         "You are a research supervisor coordinating a background researcher agent.\n\n"
