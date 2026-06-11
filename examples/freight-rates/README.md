@@ -17,6 +17,7 @@ An interactive Deep Agent that gives supply chain teams a single place to query 
 - A DeepSeek API key — [platform.deepseek.com](https://platform.deepseek.com)
 - A FreightPulse API key — [freightpulsehq.com](https://freightpulsehq.com)
 - _(Optional)_ A GoComet API key and Org ID — GoComet → Settings → API
+- _(Azure Bot only)_ An Azure Bot resource — [Azure Portal](https://portal.azure.com) → Create a resource → Azure Bot
 
 ## Setup
 
@@ -35,16 +36,56 @@ DEEPSEEK_API_KEY=sk-...
 FREIGHTPULSE_API_KEY=fp_live_...
 GOCOMET_API_KEY=                   # optional
 GOCOMET_ORG_ID=                    # optional
-FREIGHT_EXCEL_PATH=C:\path\to\your\Freight Summary.xlsx
 ```
 
-`FREIGHT_EXCEL_PATH` defaults to `C:\Users\reca\Downloads\Freight Summary - Submission to Exp & Imp (2).xlsx` if not set.
-
-**3. Run**
+**3. Run (interactive REPL)**
 
 ```
 python agent.py
 ```
+
+---
+
+## Running as an Azure Bot
+
+The agent can be exposed as an Azure Bot via `server.py`, a FastAPI app that implements the Bot Framework messaging protocol.
+
+### Additional environment variables
+
+Add these to your `.env` (get them from Azure Portal → your Bot resource → **Configuration**):
+
+```
+MICROSOFT_APP_ID=<your-bot-app-id>
+MICROSOFT_APP_PASSWORD=<your-bot-client-secret>
+MICROSOFT_APP_TENANT_ID=<your-azure-tenant-id>
+```
+
+### Start the server
+
+```
+uvicorn server:app --host 0.0.0.0 --port 3978
+```
+
+### Register the messaging endpoint
+
+In Azure Portal → your Bot resource → **Configuration**, set the **Messaging endpoint** to:
+
+```
+https://<your-public-host>/api/messages
+```
+
+> For local testing, use [Bot Framework Emulator](https://github.com/microsoft/BotFramework-Emulator) and point it to `http://localhost:3978/api/messages`. Leave App ID and Password blank in the emulator when running locally.
+
+### Endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/api/messages` | Receives activities from Azure Bot Service (register this in Azure Portal) |
+| `GET` | `/health` | Health check — returns `{"status": "ok"}` |
+
+### How it works
+
+Each Azure Bot conversation has a unique `conversation.id` that maps to the agent's `thread_id`, so the agent maintains separate memory per conversation channel (Teams, Web Chat, Emulator, etc.).
 
 ## Tools
 
@@ -106,7 +147,8 @@ The agent reads the **FCL V-V CIF** sheet. Each row represents one carrier optio
 ```
 freight-rates/
 ├── agent.py        # Deep Agent definition and interactive REPL
-├── tools.py        # All LangChain tools (Excel, FreightPulse, GoComet)
+├── server.py       # FastAPI app — Azure Bot Framework messaging endpoint
+├── tools.py        # LangChain tools (FreightPulse, GoComet)
 ├── pyproject.toml
 ├── .env            # Your API keys (not committed)
 └── .env.example    # Key template

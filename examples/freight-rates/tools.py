@@ -1,4 +1,4 @@
-"""Freight rate tools: FreightPulse API, GoComet API."""
+"""Freight rate tools: FreightPulse API."""
 
 from __future__ import annotations
 
@@ -79,33 +79,12 @@ async def _fp_get(endpoint: str, params: dict | None = None) -> dict | str:
     return resp.json()
 
 
-# ── GoComet helpers ───────────────────────────────────────────────────────────
+def _fp_inner(resp_json: dict) -> dict | str:
+    """Unwrap the double-nested FreightPulse envelope: response.data.data"""
+    if not resp_json.get("success"):
+        return f"FreightPulse returned error: {resp_json}"
+    return resp_json.get("data", {}).get("data", {})
 
-_GC_BASE = "https://app.gocomet.com/api"
-
-
-async def _gc_get(endpoint: str, params: dict | None = None) -> dict | str:
-    api_key = os.environ.get("GOCOMET_API_KEY", "")
-    org_id = os.environ.get("GOCOMET_ORG_ID", "")
-    if not api_key:
-        return "GOCOMET_API_KEY not set. Add it to .env (get it from GoComet → Settings → API)."
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "X-Org-Id": org_id,
-        "Content-Type": "application/json",
-    }
-    async with httpx.AsyncClient() as client:
-        resp = await client.get(
-            f"{_GC_BASE}/{endpoint}",
-            headers=headers,
-            params=params or {},
-            timeout=30,
-        )
-    if resp.status_code == 401:
-        return "GoComet: invalid credentials."
-    if resp.status_code != 200:
-        return f"GoComet error {resp.status_code}: {resp.text[:300]}"
-    return resp.json()
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -121,28 +100,53 @@ async def get_market_rates(origin: str, destination: str) -> str:
         origin: Port of Loading — name or UNLOCODE (e.g. 'Dalian', 'CNDLC', 'Shanghai')
         destination: Port of Discharge — name or UNLOCODE (e.g. 'Laemchabang', 'THLCH', 'Bangkok')
     """
-    origin_code = _to_unlocode(origin)
-    dest_code = _to_unlocode(destination)
+    raw = await _fp_get("freight-rates", {"mode": "ocean"})
+    if isinstance(raw, str):
+        return raw
 
-    data = await _fp_get("freight-rates", {"mode": "ocean", "origin": origin_code, "destination": dest_code})
-    if isinstance(data, str):
-        return data
+    inner = _fp_inner(raw)
+    if isinstance(inner, str):
+        return inner
 
-    ocean = data.get("ocean", [])
-    if not ocean:
-        return f"No FreightPulse market rates found for {origin} ({origin_code}) → {destination} ({dest_code})."
+    container_rates: list = inner.get("ocean", {}).get("container_rates", [])
+    if not container_rates:
+        return "No FreightPulse market rates available."
+
+    # Client-side filtering: the API ignores origin/dest params and returns fixed routes.
+    # Match by checking if origin or destination names appear in the route string.
+    origin_lc = origin.lower()
+    dest_lc = destination.lower()
+    matched = [
+        r for r in container_rates
+        if origin_lc in r.get("route", "").lower() or dest_lc in r.get("route", "").lower()
+    ]
+    rates_to_show = matched if matched else container_rates
+    note = "" if matched else f"\n  (No exact match for {origin} → {destination}; showing all available routes)"
 
     lines = [f"FreightPulse Live Market Rates — {origin} → {destination}", "─" * 60]
-    for r in ocean:
-        route = r.get("route", f"{origin} → {destination}")
+    for r in rates_to_show:
+        route = r.get("route", "Unknown route")
+        rate20 = r.get("rate_20ft")
         rate40 = r.get("rate_40ft", "N/A")
+        rate40hc = r.get("rate_40hc")
         transit = r.get("transit_days", "?")
         trend = r.get("trend", "N/A")
-        lines.append(f"  • {route}  |  40ft: ${rate40}  |  {transit} days  |  Trend: {trend}")
+        change = r.get("change_week")
+        avail = r.get("carrier_availability", "")
+        rate_str = f"20ft: ${rate20}  " if rate20 else ""
+        rate_str += f"40ft: ${rate40}"
+        if rate40hc:
+            rate_str += f"  40HC: ${rate40hc}"
+        change_str = f"  ({change:+.1f}% wk)" if change is not None else ""
+        avail_str = f"  | Availability: {avail}" if avail else ""
+        lines.append(f"  • {route}")
+        lines.append(f"    {rate_str}  |  {transit} days  |  Trend: {trend}{change_str}{avail_str}")
 
-    ts = data.get("timestamp", "")
+    ts = raw.get("data", {}).get("timestamp", "")
     if ts:
         lines.append(f"\n  Data as of: {ts}")
+    if note:
+        lines.append(note)
     return "\n".join(lines)
 
 
@@ -153,28 +157,49 @@ async def get_port_congestion(port: Optional[str] = None) -> str:
     Args:
         port: Optional port name or UNLOCODE. If omitted, returns all monitored ports.
     """
-    params = {}
-    if port:
-        params["port"] = _to_unlocode(port)
+    raw = await _fp_get("port-congestion")
+    if isinstance(raw, str):
+        return raw
 
-    data = await _fp_get("port-congestion", params)
-    if isinstance(data, str):
-        return data
+    inner = _fp_inner(raw)
+    if isinstance(inner, str):
+        return inner
 
-    ports_data = data.get("ports", data) if isinstance(data, dict) else data
-    if not ports_data:
+    all_ports: list = inner.get("ports", [])
+    if not all_ports:
         return "No port congestion data available."
 
-    lines = ["Port Congestion — FreightPulse", "─" * 45]
-    for p in (ports_data if isinstance(ports_data, list) else [ports_data]):
-        name = p.get("port") or p.get("name", "Unknown")
-        level = p.get("congestion_level") or p.get("level", "N/A")
-        wait = p.get("waiting_time") or p.get("wait_days", "N/A")
-        vessels = p.get("vessels_waiting", "")
-        line = f"  • {name}: {level} congestion | Wait: {wait}"
-        if vessels:
-            line += f" | Vessels: {vessels}"
-        lines.append(line)
+    if port:
+        port_lc = port.lower()
+        port_code = _to_unlocode(port).upper()
+        filtered = [
+            p for p in all_ports
+            if port_lc in p.get("port", "").lower()
+            or p.get("port_code", "").upper() == port_code
+        ]
+        ports_to_show = filtered if filtered else all_ports
+        header = f"Port Congestion — {port} — FreightPulse"
+        if not filtered:
+            header += f"\n  (No exact match for '{port}'; showing all ports)"
+    else:
+        ports_to_show = all_ports
+        header = f"Port Congestion ({len(all_ports)} ports) — FreightPulse"
+
+    lines = [header, "─" * 55]
+    for p in ports_to_show:
+        name = p.get("port", "Unknown")
+        code = p.get("port_code", "")
+        level = p.get("congestion_level", "N/A")
+        wait_h = p.get("avg_wait_time_hours")
+        at_anchor = p.get("vessels_at_anchor")
+        at_berth = p.get("vessels_at_berth")
+        trend = p.get("trend", "")
+        wait_str = f"{wait_h}h wait" if wait_h is not None else ""
+        vessel_str = ""
+        if at_anchor is not None and at_berth is not None:
+            vessel_str = f" | {at_anchor} at anchor, {at_berth} at berth"
+        trend_str = f" | {trend}" if trend else ""
+        lines.append(f"  • {name} ({code}): {level}{(' | ' + wait_str) if wait_str else ''}{vessel_str}{trend_str}")
     return "\n".join(lines)
 
 
@@ -182,119 +207,45 @@ async def get_port_congestion(port: Optional[str] = None) -> str:
 async def get_supply_chain_disruptions() -> str:
     """Get active supply chain disruption alerts from FreightPulse
     (port closures, route diversions, labour strikes, weather events, geopolitical risks)."""
-    data = await _fp_get("disruptions")
-    if isinstance(data, str):
-        return data
+    raw = await _fp_get("disruptions")
+    if isinstance(raw, str):
+        return raw
 
-    disruptions = data.get("disruptions", data) if isinstance(data, dict) else data
-    if not disruptions:
+    inner = _fp_inner(raw)
+    if isinstance(inner, str):
+        return inner
+
+    alerts: list = inner.get("alerts", [])
+    if not alerts:
         return "No active supply chain disruptions reported by FreightPulse."
 
-    lines = ["Active Supply Chain Disruptions — FreightPulse", "─" * 50]
-    for d in (disruptions if isinstance(disruptions, list) else [disruptions]):
-        title = d.get("title") or d.get("event", "Unknown event")
-        location = d.get("location") or d.get("region") or d.get("port", "")
-        severity = d.get("severity") or d.get("impact", "")
-        updated = d.get("updated_at") or d.get("date", "")
-        line = f"  [{severity.upper() if severity else 'INFO'}] {title}"
-        if location:
-            line += f" — {location}"
-        if updated:
-            line += f" (updated: {updated})"
-        lines.append(line)
+    lines = [f"Active Supply Chain Disruptions ({len(alerts)}) — FreightPulse", "─" * 55]
+    for d in alerts:
+        severity = d.get("severity", "info").upper()
+        title = d.get("title", "Unknown event")
+        status = d.get("status", "")
+        regions = ", ".join(d.get("affected_regions", []))
+        impact = d.get("impact", {})
+        delay = impact.get("transit_delay_days")
+        rate_inc = impact.get("rate_increase_percent")
+        lines.append(f"  [{severity}] {title}  ({status})")
+        if regions:
+            lines.append(f"    Regions: {regions}")
+        impact_parts = []
+        if delay:
+            impact_parts.append(f"+{delay}d transit")
+        if rate_inc:
+            impact_parts.append(f"+{rate_inc}% rates")
+        if impact_parts:
+            lines.append(f"    Impact: {', '.join(impact_parts)}")
+
+    forecast = inner.get("risk_forecast", {})
+    if forecast:
+        outlook = forecast.get("next_7_days", "")
+        factors = forecast.get("factors", [])
+        lines.append(f"\n  7-day risk outlook: {outlook}")
+        for f in factors:
+            lines.append(f"    • {f}")
     return "\n".join(lines)
 
 
-@tool
-async def track_container(container_number: str) -> str:
-    """Track a container's live status and voyage milestones using GoComet.
-
-    Args:
-        container_number: Container number (e.g. TCKU1234567, MSCU9876543)
-    """
-    data = await _gc_get("container-tracking/track", {"container_number": container_number})
-    if isinstance(data, str):
-        return data
-
-    # Normalise across potential GoComet response shapes
-    tracking = data.get("data") or data.get("tracking") or data
-
-    lines = [f"Container Tracking — {container_number}", "─" * 50]
-
-    status = tracking.get("status") or tracking.get("current_status", "Unknown")
-    vessel = tracking.get("vessel") or tracking.get("vessel_name", "")
-    voyage = tracking.get("voyage") or tracking.get("voyage_number", "")
-    carrier = tracking.get("carrier") or tracking.get("scac", "")
-    pol = tracking.get("pol") or tracking.get("origin", "")
-    pod = tracking.get("pod") or tracking.get("destination", "")
-    eta = tracking.get("eta") or tracking.get("estimated_arrival", "")
-    atd = tracking.get("atd") or tracking.get("actual_departure", "")
-
-    lines.append(f"  Status   : {status}")
-    if carrier:
-        lines.append(f"  Carrier  : {carrier}")
-    if vessel:
-        lines.append(f"  Vessel   : {vessel}" + (f" / {voyage}" if voyage else ""))
-    if pol:
-        lines.append(f"  Origin   : {pol}")
-    if pod:
-        lines.append(f"  Dest     : {pod}")
-    if atd:
-        lines.append(f"  Departed : {atd}")
-    if eta:
-        lines.append(f"  ETA      : {eta}")
-
-    events = tracking.get("events") or tracking.get("milestones") or []
-    if events:
-        lines.append("\n  Events:")
-        for ev in events[-6:]:  # last 6 events
-            dt = ev.get("date") or ev.get("timestamp", "")
-            desc = ev.get("description") or ev.get("event", "")
-            loc = ev.get("location") or ev.get("port", "")
-            lines.append(f"    {dt}  {desc}" + (f" — {loc}" if loc else ""))
-
-    return "\n".join(lines)
-
-
-@tool
-async def get_gocomet_rate_benchmarks(origin: str, destination: str) -> str:
-    """Fetch freight rate benchmarks and market comparisons from GoComet for a trade lane.
-
-    Args:
-        origin: Port of Loading name or code (e.g. 'Shanghai', 'CNSHA')
-        destination: Port of Discharge name or code (e.g. 'Bangkok', 'THLCH')
-    """
-    origin_code = _to_unlocode(origin)
-    dest_code = _to_unlocode(destination)
-
-    data = await _gc_get(
-        "rate-benchmarks",
-        {"origin": origin_code, "destination": dest_code, "container_type": "40HC"},
-    )
-    if isinstance(data, str):
-        return data
-
-    benchmarks = data.get("data") or data.get("benchmarks") or data
-    lines = [f"GoComet Rate Benchmarks — {origin} → {destination}", "─" * 55]
-
-    if isinstance(benchmarks, dict):
-        market_avg = benchmarks.get("market_average") or benchmarks.get("avg_rate")
-        market_low = benchmarks.get("market_low") or benchmarks.get("min_rate")
-        market_high = benchmarks.get("market_high") or benchmarks.get("max_rate")
-        trend = benchmarks.get("trend") or benchmarks.get("rate_trend")
-        if market_avg:
-            lines.append(f"  Market Average : ${market_avg}")
-        if market_low and market_high:
-            lines.append(f"  Range          : ${market_low} — ${market_high}")
-        if trend:
-            lines.append(f"  Trend          : {trend}")
-    elif isinstance(benchmarks, list):
-        for b in benchmarks:
-            carrier = b.get("carrier") or b.get("scac", "")
-            rate = b.get("rate") or b.get("all_in_rate", "")
-            transit = b.get("transit_days", "")
-            lines.append(f"  • {carrier}: ${rate}" + (f" | {transit}d" if transit else ""))
-    else:
-        lines.append(f"  Raw response: {benchmarks}")
-
-    return "\n".join(lines)
