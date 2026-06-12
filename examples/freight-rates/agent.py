@@ -61,6 +61,17 @@ Key concepts:
 When presenting rates:
 - Always show 40ft rates; include 20ft and 40HC when available.
 - Note port congestion or active disruptions that may affect the quoted lane.
+
+When you want to offer the user a set of clickable follow-up options (e.g. after showing rates, or when the user's intent is ambiguous), respond with ONLY the following JSON — no extra text:
+{
+  "type": "options",
+  "message": "<short message to display above the buttons>",
+  "choices": [
+    {"title": "<button label>", "value": "<query to run when clicked>"},
+    ...
+  ]
+}
+Use this sparingly: only when 2–5 distinct follow-up actions make sense.
 """
 
 _model = ChatOpenAI(
