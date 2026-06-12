@@ -29,7 +29,7 @@ from botbuilder.schema import Activity, ActivityTypes, Attachment
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from langchain_core.messages import HumanMessage, ToolMessage
+from langchain_core.messages import HumanMessage
 
 from agent import agent
 
@@ -68,23 +68,6 @@ async def _on_error(context: TurnContext, error: Exception) -> None:
 
 _ADAPTER.on_turn_error = _on_error
 
-
-_FOLLOW_UP_OPTIONS = [
-    ("get_market_rates",            "Get market rates",     "get market rates from Shanghai to Los Angeles"),
-    ("get_port_congestion",         "Check port congestion","check port congestion at Singapore"),
-    ("get_supply_chain_disruptions","Check disruptions",    "any active supply chain disruptions?"),
-]
-
-
-def _follow_up_card(tools_used: set[str]) -> Attachment | None:
-    choices = [
-        {"title": label, "value": query}
-        for tool_name, label, query in _FOLLOW_UP_OPTIONS
-        if tool_name not in tools_used
-    ]
-    if not choices:
-        return None
-    return _build_options_card({"message": "What would you like to check next?", "choices": choices})
 
 
 def _build_options_card(data: dict) -> Attachment:
@@ -166,15 +149,6 @@ async def _handle_turn(turn_context: TurnContext) -> None:
 
     # Send the agent's plain text answer
     await turn_context.send_activity(content)
-
-    # Always append a follow-up card after any tool was called
-    tools_used = {m.name for m in messages if isinstance(m, ToolMessage)}
-    if tools_used:
-        card = _follow_up_card(tools_used)
-        if card:
-            await turn_context.send_activity(
-                Activity(type=ActivityTypes.message, attachments=[card])
-            )
 
 
 @app.post("/api/messages")

@@ -1,8 +1,10 @@
-"""Freight rate tools: FreightPulse API."""
+"""Freight rate tools: FreightPulse API + Microsoft Graph email."""
 
 from __future__ import annotations
 
+import base64
 import os
+from pathlib import Path
 from typing import Optional
 
 import httpx
@@ -248,4 +250,210 @@ async def get_supply_chain_disruptions() -> str:
             lines.append(f"    • {f}")
     return "\n".join(lines)
 
+
+# ═════════════════════════════════════════════════════════════════════════════
+# MICROSOFT GRAPH — EMAIL
+# ═════════════════════════════════════════════════════════════════════════════
+# Required Azure AD app permissions (Application, with admin consent):
+#   Mail.Read, Mail.ReadBasic, User.Read.All
+# Required .env keys:
+#   MICROSOFT_APP_ID, MICROSOFT_APP_PASSWORD, MICROSOFT_APP_TENANT_ID,
+#   GRAPH_USER_EMAIL  (UPN / email of the mailbox to read, e.g. you@company.com)
+
+
+async def _get_graph_token() -> str:
+    """Obtain a client-credentials bearer token for Microsoft Graph."""
+    tenant_id = os.environ.get("MICROSOFT_APP_TENANT_ID", "")
+    client_id = os.environ.get("MICROSOFT_APP_ID", "")
+    client_secret = os.environ.get("MICROSOFT_APP_PASSWORD", "")
+    if not all([tenant_id, client_id, client_secret]):
+        return ""
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(
+            f"https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token",
+            data={
+                "grant_type": "client_credentials",
+                "client_id": client_id,
+                "client_secret": client_secret,
+                "scope": "https://graph.microsoft.com/.default",
+            },
+            timeout=30,
+        )
+    if resp.status_code != 200:
+        return ""
+    return resp.json().get("access_token", "")
+
+
+@tool
+async def get_emails(query: Optional[str] = None, top: int = 5) -> str:
+    """Fetch recent emails from the configured mailbox via Microsoft Graph.
+
+    Args:
+        query: Optional keyword to search in email subject/body (e.g. 'shipment', 'freight').
+        top:   Number of emails to return (1–20, default 5).
+    """
+    user_email = os.environ.get("GRAPH_USER_EMAIL", "")
+    if not user_email:
+        return "GRAPH_USER_EMAIL is not configured in .env."
+
+    token = await _get_graph_token()
+    if not token:
+        return (
+            "Could not obtain a Microsoft Graph token. "
+            "Check MICROSOFT_APP_ID / PASSWORD / TENANT_ID and that "
+            "Mail.Read + Mail.ReadBasic application permissions have admin consent."
+        )
+
+    params: dict = {
+        "$top": min(max(top, 1), 20),
+        "$orderby": "receivedDateTime desc",
+        "$select": "id,subject,from,receivedDateTime,bodyPreview,isRead,hasAttachments",
+    }
+    if query:
+        params["$search"] = f'"{query}"'
+        params.pop("$orderby", None)  # $search and $orderby cannot be combined
+
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(
+            f"https://graph.microsoft.com/v1.0/users/{user_email}/messages",
+            headers={"Authorization": f"Bearer {token}"},
+            params=params,
+            timeout=30,
+        )
+
+    if resp.status_code == 401:
+        return (
+            "Graph API returned 401. Verify Mail.Read application permission "
+            "has been granted admin consent in Azure AD."
+        )
+    if resp.status_code == 403:
+        return (
+            "Graph API returned 403. The app lacks permission to read this mailbox. "
+            "Grant Mail.Read (Application) and Mail.ReadBasic (Application) in Azure AD."
+        )
+    if resp.status_code != 200:
+        return f"Graph API error {resp.status_code}: {resp.text[:300]}"
+
+    emails = resp.json().get("value", [])
+    if not emails:
+        return f"No emails found{' matching ' + repr(query) if query else ''}."
+
+    header = f"Emails — {user_email}" + (f" | search: {query!r}" if query else "")
+    lines = [header, "─" * 60]
+    for e in emails:
+        msg_id = e.get("id", "")
+        subject = e.get("subject") or "(no subject)"
+        sender = e.get("from", {}).get("emailAddress", {}).get("address", "unknown")
+        received = (e.get("receivedDateTime") or "")[:10]
+        preview = (e.get("bodyPreview") or "")[:120].replace("\r\n", " ").replace("\n", " ")
+        unread = " [UNREAD]" if not e.get("isRead") else ""
+        has_att = " [HAS ATTACHMENT]" if e.get("hasAttachments") else ""
+        lines.append(f"  • [{received}]{unread}{has_att} {subject}")
+        lines.append(f"    From: {sender}")
+        lines.append(f"    ID: {msg_id}")
+        if preview:
+            lines.append(f"    {preview}…")
+    return "\n".join(lines)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Attachment size threshold: Graph returns contentBytes inline only for < 3 MB.
+# Larger attachments must be streamed via the /$value endpoint.
+_SMALL_ATTACHMENT_LIMIT = 3 * 1024 * 1024  # 3 MB
+
+
+@tool
+async def download_email_attachments(message_id: str, save_dir: Optional[str] = None) -> str:
+    """Download all file attachments from an Outlook email to a local folder.
+
+    Handles both small attachments (< 3 MB, fetched inline as base64) and large
+    attachments (>= 3 MB, streamed in chunks via the Graph /$value endpoint).
+
+    Args:
+        message_id: The Graph message ID from get_emails output (the 'ID:' line).
+        save_dir:   Folder to save files into. Defaults to ./downloads/ beside server.py.
+    """
+    user_email = os.environ.get("GRAPH_USER_EMAIL", "")
+    if not user_email:
+        return "GRAPH_USER_EMAIL is not configured in .env."
+
+    token = await _get_graph_token()
+    if not token:
+        return "Could not obtain a Microsoft Graph token."
+
+    dest = Path(save_dir) if save_dir else Path(__file__).parent / "downloads"
+    dest.mkdir(parents=True, exist_ok=True)
+
+    base_url = f"https://graph.microsoft.com/v1.0/users/{user_email}/messages/{message_id}"
+    headers = {"Authorization": f"Bearer {token}"}
+
+    # Step 1 — list attachments (metadata only, no content yet)
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(
+            f"{base_url}/attachments",
+            headers=headers,
+            params={"$select": "id,name,contentType,size,isInline"},
+            timeout=30,
+        )
+
+    if resp.status_code == 404:
+        return f"Message not found — check the ID is correct: {message_id[:60]}…"
+    if resp.status_code != 200:
+        return f"Graph API error {resp.status_code}: {resp.text[:300]}"
+
+    # Skip inline attachments (embedded images in the email body)
+    all_attachments = resp.json().get("value", [])
+    file_attachments = [a for a in all_attachments if not a.get("isInline")]
+
+    if not file_attachments:
+        return "This email has no file attachments (only inline images or none at all)."
+
+    results: list[str] = []
+
+    async with httpx.AsyncClient() as client:
+        for att in file_attachments:
+            att_id = att["id"]
+            name = att.get("name") or "attachment"
+            size = att.get("size") or 0
+            # Sanitise filename to avoid path traversal or illegal chars
+            safe_name = "".join(c if c.isalnum() or c in "._- ()" else "_" for c in name)
+            out_path = dest / safe_name
+
+            if size <= _SMALL_ATTACHMENT_LIMIT:
+                # ── Small attachment: Graph returns contentBytes as base64 ──
+                r = await client.get(
+                    f"{base_url}/attachments/{att_id}",
+                    headers=headers,
+                    timeout=60,
+                )
+                if r.status_code != 200:
+                    results.append(f"  FAILED  {name} ({size // 1024} KB) — HTTP {r.status_code}")
+                    continue
+                content_b64 = r.json().get("contentBytes", "")
+                if not content_b64:
+                    results.append(f"  FAILED  {name} — no content returned by Graph")
+                    continue
+                out_path.write_bytes(base64.b64decode(content_b64))
+                results.append(f"  OK  {name} ({size // 1024} KB) → {out_path}")
+
+            else:
+                # ── Large attachment: stream raw bytes via /$value ──
+                size_mb = size / (1024 * 1024)
+                async with client.stream(
+                    "GET",
+                    f"{base_url}/attachments/{att_id}/$value",
+                    headers=headers,
+                    timeout=300,
+                ) as r:
+                    if r.status_code != 200:
+                        results.append(f"  FAILED  {name} ({size_mb:.1f} MB) — HTTP {r.status_code}")
+                        continue
+                    with out_path.open("wb") as f:
+                        async for chunk in r.aiter_bytes(chunk_size=65_536):
+                            f.write(chunk)
+                results.append(f"  OK  {name} ({size_mb:.1f} MB) → {out_path}")
+
+    ok_count = sum(1 for r in results if r.startswith("  OK"))
+    summary = f"Downloaded {ok_count}/{len(file_attachments)} attachment(s) to {dest}:"
+    return summary + "\n" + "\n".join(results)
 
