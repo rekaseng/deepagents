@@ -1,0 +1,13 @@
+# Secrets & local config
+.env
+secrets/
+
+# Local runtime state
+data/
+scratch/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+uv.lock
