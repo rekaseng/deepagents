@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Deep Agent Platform</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <div class="brand" id="brand" title="Back to chat">
+        <div class="logo">◆</div>
+        <div>
+          <h1>Deep Agent</h1>
+          <span class="sub">platform</span>
+        </div>
+      </div>
+
+      <button id="new-chat" class="new-chat">+ New chat</button>
+
+      <section class="panel grow">
+        <h2>Chats</h2>
+        <ul id="history-list" class="list history"></ul>
+      </section>
+
+      <div class="sidebar-foot">
+        <div class="hover-zone" id="hover-zone">
+          <div class="flyout" id="flyout">
+            <button class="flyout-item" data-tab="tools">
+              <span class="fly-icon">⚙</span> Tools
+              <span id="fly-tools-count" class="badge"></span>
+            </button>
+            <button class="flyout-item" data-tab="skills">
+              <span class="fly-icon">✦</span> Skills
+              <span id="fly-skills-count" class="badge"></span>
+            </button>
+          </div>
+          <div class="hover-trigger" id="hover-trigger">
+            <span class="hz-icon">▦</span>
+            <span>Tools &amp; Skills</span>
+            <span class="hz-caret">▴</span>
+          </div>
+        </div>
+      </div>
+    </aside>
+
+    <main class="main">
+      <!-- Chat view -->
+      <section id="chat-view" class="view">
+        <div id="feed" class="feed">
+          <div class="empty-state">
+            <div class="empty-logo">◆</div>
+            <p>Give the agent a goal.</p>
+            <span>It plans, calls tools, and reports back.</span>
+          </div>
+        </div>
+
+        <form id="goal-form" class="composer">
+          <textarea id="goal-input" placeholder="Describe a goal — e.g. 'What is 4567 * 89, then fetch example.com'" rows="1"></textarea>
+          <button type="submit" id="send-btn">Run</button>
+        </form>
+      </section>
+
+      <!-- Tools / Skills catalog view -->
+      <section id="catalog-view" class="view hidden">
+        <header class="catalog-head">
+          <div class="catalog-top">
+            <button id="back-chat" class="back">← Chat</button>
+            <div class="tabs">
+              <button class="tab active" data-tab="tools">Tools</button>
+              <button class="tab" data-tab="skills">Skills</button>
+            </div>
+            <span class="catalog-src">from docs/03-communication-layer.md · <span class="live-dot inline"></span> = registered live</span>
+          </div>
+          <div class="filters" id="filters"></div>
+        </header>
+        <div id="catalog-body" class="catalog-body"></div>
+      </section>
+    </main>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>

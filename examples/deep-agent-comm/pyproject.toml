@@ -1,0 +1,38 @@
+[project]
+name = "deep-agent-comm"
+version = "0.1.0"
+description = "Deep Agent communication platform — web UI + Gmail + skills + tools, with a Microsoft Teams bot endpoint, built on deepagents/LangGraph"
+requires-python = ">=3.11"
+dependencies = [
+    "deepagents>=0.6.0",
+    "langgraph>=0.2.0",
+    "langgraph-checkpoint-sqlite>=2.0.0",
+    "aiosqlite>=0.20.0",
+    "langchain-deepseek>=0.1.0",
+    "python-dotenv>=1.0.0",
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.30.0",
+    "httpx>=0.28.0",
+    "openpyxl>=3.1.0",
+    "google-api-python-client>=2.100.0",
+    "google-auth>=2.20.0",
+    "google-auth-oauthlib>=1.2.0",
+    "apscheduler>=3.10.0",
+    # Microsoft Teams / Azure Bot Framework endpoint (app/teams.py)
+    "botbuilder-core>=4.16.0",
+    "aiohttp>=3.9.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.24.0",
+]
+
+# This example is run as an app (python -m app.main), not installed as a library,
+# so uv only manages the venv + dependencies — it does not build the project.
+[tool.uv]
+package = false
+
+[tool.uv.sources]
+deepagents = { path = "../../libs/deepagents", editable = true }
